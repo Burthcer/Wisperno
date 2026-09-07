@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyInstaller build/dist output (the actual portable build - see build_exe.py /
+# wisperno.spec to reproduce it; it does not belong in source control, see
+# INSTALL.md for why)
+build/
+dist/
+*.manifest
+_internal/
+
+# Packaged release staging (scripts/package_*.py output)
+Final App/
+apk/
+
+# Model weights & caches - fetched by download_models.py, see models/MODELS.md.
+# Multi-GB GGUF/CTranslate2 files have no business in git history.
+models/*.gguf
+models/*.bin
+models/.cache/
+models/.locks/
+models/models--*/
+models/CACHEDIR.TAG
+!models/.gitkeep
+!models/MODELS.md
+
+# Audio scratch/test artifacts
+*.wav
+*.flac
+tests/**/*.wav
+tests/**/fixtures/audio/
+
+# Runtime state (logs, local db) - user machine only
+logs/*.log
+!logs/.gitkeep
+*.db
+wisperno.db
+
+# Native/C++ build artifacts (in case native extensions are ever added)
+*.o
+*.obj
+*.dll
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+
+# Installer output
+installer/*.exe
+installer/*.msi
+*.iss.bak
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Raw, unreviewed screen captures (Windows Snipping Tool's default naming) -
+# these have twice turned out to be competitor-app captures or real personal
+# dictation history, not Wisperno's own clean UI. Only curated, explicitly
+# renamed files (e.g. assets/screenshots/settings-tab.png) get committed;
+# anything still named "Screenshot YYYY-MM-DD HHMMSS.png" was never reviewed
+# and must not be picked up by a future automated intake round.
+assets/screenshots/Screenshot *.png
+assets/screenshots/new assets/
