@@ -1,0 +1,9 @@
+[
+  {"find": "whisper flow", "replace": "Wispr Flow"},
+  {"find": "wisper flow", "replace": "Wispr Flow"},
+  {"find": "wisperno", "replace": "Wisperno"},
+  {"find": "pie torch", "replace": "PyTorch"},
+  {"find": "cuda", "replace": "CUDA"},
+  {"find": "json", "replace": "JSON"},
+  {"find": "git hub", "replace": "GitHub"}
+]
