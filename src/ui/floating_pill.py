@@ -29,6 +29,8 @@ STATE_SELECTION_PROCESSING = "selection_processing"
 STATE_SELECTION_SUCCESS = "selection_success"
 STATE_FALLBACK_WARNING = "fallback_warning"
 STATE_CPU_MODE = "cpu_mode"
+STATE_NO_SELECTION = "no_selection"
+STATE_ENGINE_FALLBACK = "engine_fallback"
 
 DORMANT_W = 220
 RECORDING_W = 320
@@ -39,6 +41,8 @@ ERROR_W = 300
 SELECTION_PROCESSING_W = 300
 FALLBACK_WARNING_W = 320
 CPU_MODE_W = 360
+NO_SELECTION_W = 300
+ENGINE_FALLBACK_W = 380
 PILL_H = 34  # compact profile: half-height capsule radius (17px), 8px/4px h/v padding
 BOTTOM_OFFSET = 110
 
@@ -58,13 +62,11 @@ class FloatingPill(QWidget):
     close_requested = Signal()  # left to the controller: hide-to-tray vs full quit, per config
     quit_requested = Signal()
 
-    def __init__(self, initial_mode: str = "POLISH", hotkey_label: str = "Ctrl+Alt"):
-        super().__init__(
-            None,
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool,
-        )
+    def __init__(self, initial_mode: str = "POLISH", hotkey_label: str = "Ctrl+Alt", always_on_top: bool = True):
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         # Hard ceiling independent of any width-computation code path: the pill
@@ -182,6 +184,12 @@ class FloatingPill(QWidget):
         elif state == STATE_CPU_MODE:
             self._width_target = CPU_MODE_W
             self._collapse_timer.start(4000)  # one-time startup info, longer than a routine warning
+        elif state == STATE_NO_SELECTION:
+            self._width_target = NO_SELECTION_W
+            self._collapse_timer.start(2000)
+        elif state == STATE_ENGINE_FALLBACK:
+            self._width_target = ENGINE_FALLBACK_W
+            self._collapse_timer.start(4000)  # a real, unusual event - longer than a routine toast
 
         self.update()
 
@@ -392,6 +400,22 @@ class FloatingPill(QWidget):
             self._draw_balanced_text(painter, QRectF(m, 0, w - 2 * m, h), "⚠ Running in CPU Compatibility Mode (No dedicated GPU detected)")
             return
 
+        if self.state == STATE_NO_SELECTION:
+            painter.setPen(QColor(theme.PILL_TEXT))
+            painter.setFont(font)
+            self._draw_balanced_text(painter, QRectF(m, 0, w - 2 * m, h), "Highlight text to change style")
+            return
+
+        if self.state == STATE_ENGINE_FALLBACK:
+            painter.setPen(QColor(theme.ACCENT_ERROR))
+            bold = QFont(theme.FONT_FAMILY, 9, QFont.Weight.DemiBold)
+            painter.setFont(bold)
+            self._draw_balanced_text(
+                painter, QRectF(m, 0, w - 2 * m, h),
+                "⚠ Experimental preset failed to load. Reverted to Turbo Flagship.",
+            )
+            return
+
     def _paint_close_button(self, painter: QPainter, w: int, h: int) -> None:
         """Small '×' at the right edge, low-alpha by default, full opacity on hover."""
         size = 18.0
@@ -511,3 +535,11 @@ class FloatingPill(QWidget):
             self.show()
         else:
             self.hide()
+
+    def set_always_on_top(self, enabled: bool) -> None:
+        """Qt only picks up a changed WindowStaysOnTopHint flag on the next
+        show() - a bare setWindowFlag() call leaves the window unmapped."""
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
+        if was_visible:
+            self.show()

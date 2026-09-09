@@ -10,6 +10,12 @@ for the capitalization/terminal-punctuation pass at the end.
 
 import re
 
+# A period/!/?/:/, immediately followed by a letter with NO space at all
+# ("Hello.How are you?") - restricted to letters, never digits, so real
+# numeric text (decimals like "3.14", thousands separators like "1,234") is
+# never touched by this.
+_MISSING_SPACE_RE = re.compile(r"([.!?:,])(?=[A-Za-z])")
+
 # "like" is only a filler when it trails off as a verbal pause (Whisper tends
 # to punctuate that with a comma) - stripping every "like" would also eat the
 # verb ("I like pizza"), so it's matched separately and only with a comma.
@@ -60,6 +66,16 @@ def capitalize_pronoun_i(text: str) -> str:
     return LOWERCASE_I_RE.sub("I", text)
 
 
+def normalize_punctuation_spacing(text: str) -> str:
+    """Insert a missing space after sentence/clause punctuation that's fused
+    directly to the next word ('Hello.How' -> 'Hello. How') - a real defect
+    both here and in transformer.py's LLM path (fixed content can still be
+    typographically fused if the raw input was), so both call this. Safe
+    against decimals/thousands-separators since it only fires before a
+    letter, never a digit."""
+    return _MISSING_SPACE_RE.sub(r"\1 ", text)
+
+
 def _apply_spoken_commands(text: str) -> str:
     """Spoken developer/terminal shorthand -> literal symbols ("slash compact"
     -> "/compact", "my dash file" -> "my-file", "backtick" -> "`")."""
@@ -107,13 +123,22 @@ def _cap_sentences(text: str) -> str:
 
 def _split_list(text: str, split_re: re.Pattern) -> list:
     """Split on a cue pattern; return the item segments (text after each cue),
-    dropping the pre-first-cue lead-in, or [] if fewer than _MIN_LIST_CUES cues found."""
+    or [] if fewer than _MIN_LIST_CUES cues have REAL content after them.
+
+    Gating on the filtered item count (not the raw cue count) matters: plain
+    prose that happens to use two ordinal words ("first"/"second") with real
+    sentence punctuation between them - e.g. normalize_punctuation_spacing()
+    turning "first.second,third" into "first. second, third" - produces cues
+    with nothing but leftover punctuation between them ('. ', ', '), which
+    isn't a spoken list and must fall through to the normal sentence path,
+    not render as a garbage "1. ." bullet. A genuine spoken list has actual
+    words between cues ("first buy milk second get eggs").
+    """
     parts = split_re.split(text)
-    cues = parts[1::2]
-    if len(cues) < _MIN_LIST_CUES:
+    items = [i.strip(" ,.") for i in parts[2::2] if re.search(r"[A-Za-z0-9]", i)]
+    if len(items) < _MIN_LIST_CUES:
         return []
-    items = parts[2::2]
-    return [i.strip(" ,") for i in items if i.strip(" ,")]
+    return items
 
 
 def format_direct(text: str) -> str:
@@ -123,6 +148,7 @@ def format_direct(text: str) -> str:
     if not text:
         return ""
 
+    text = normalize_punctuation_spacing(text)
     text = _strip_fillers(text)
     if not text:
         return ""
@@ -189,6 +215,15 @@ def _demo() -> None:
 
     r13 = format_direct("um so uh this is one thought\n\n  the the other thought here")
     assert r13 == "So this is one thought.\n\nThe other thought here.", r13
+
+    r14 = format_direct("this is one sentence.here comes another")
+    assert r14 == "This is one sentence. Here comes another.", r14
+
+    r15 = format_direct("hello.how are you?wait,really")
+    assert r15 == "Hello. How are you? Wait, really.", r15
+
+    r16 = format_direct("the value is 3.14 and there were 1,234 attendees")
+    assert r16 == "The value is 3.14 and there were 1,234 attendees.", r16  # numeric punctuation untouched
 
     t0 = time.perf_counter()
     for _ in range(100):

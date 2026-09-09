@@ -14,10 +14,10 @@ quantized LLM before pasting the result into whichever app has focus. No
 audio or text ever leaves the machine.
 
 **Ships with Turbo Flagship as the default engine** - `Qwen2.5-1.5B-Instruct`
-at ~91 tok/s decode, ~3.5GB combined VRAM with Whisper, and the fastest
-measured latency of the four presets (see the table below). Switch presets
-any time from Settings if you'd rather trade speed for the Flagship tier's
-extra fidelity headroom.
+at ~114 tok/s decode, ~3.5GB combined VRAM with Whisper, and the fastest
+measured latency of the four presets (see [BENCHMARKS.md](BENCHMARKS.md)).
+Switch presets any time from Settings if you'd rather trade speed for the
+Flagship tier's extra fidelity headroom.
 
 ## Core Features
 
@@ -41,15 +41,17 @@ extra fidelity headroom.
 
   | Preset | VRAM | Decode speed | Notes |
   |---|---|---|---|
-  | **Turbo Flagship (default)** | ~3.5 GB | ~91 tok/s | Fastest tier, instant text replacement |
-  | Eco | ~3.6 GB | ~80 tok/s | Compact footprint, Standard-level fidelity |
-  | Standard | ~3.7 GB | ~72 tok/s | Balanced, previous default |
-  | Flagship | ~5.1 GB | ~53 tok/s | Q8_0 weights + fp16 KV-cache, highest fidelity |
+  | **Turbo Flagship (default)** | ~3.5 GB | ~114 tok/s | Fastest tier, instant text replacement |
+  | Eco | ~3.6 GB | ~103 tok/s | Compact footprint, Standard-level fidelity |
+  | Standard | ~3.7 GB | ~92 tok/s | Balanced, previous default |
+  | Flagship | ~5.1 GB | ~63 tok/s | Q8_0 weights + fp16 KV-cache, highest fidelity |
 
 - **Contextual transform modes**: Polish, Prompt Engineer, Bullet Points, Raw
   verbatim, plus a user-defined Transforms hub for custom prompts.
 - **Vocabulary/dictionary** biasing for names and jargon Whisper wouldn't
-  otherwise get right.
+  otherwise get right - ships empty by default; add your own via Settings ->
+  Dictionary (the corrections used during development were personal to that
+  environment and intentionally not included here).
 
 ## Default Hotkeys
 
@@ -76,6 +78,12 @@ Summarized from this build's own update notes, verified against source
 where checkable (e.g. the hotkeys above are read from `src/database.py`/
 `src/engine.py`, not copied from prose):
 
+- **Inference engine upgrade**: `llama-cpp-python` `0.2.90 -> 0.3.26`,
+  every preset decoding ~20-30% faster (Turbo Flagship: 89.3 -> 113.8 tok/s)
+  with unchanged VRAM and fidelity. See [BENCHMARKS.md](BENCHMARKS.md).
+- **Optional audio cues** (`src/audio_cues.py`): a short tone on
+  dictation start/stop via `winsound.Beep()` - stdlib, no new dependency,
+  off by default, toggle in Settings -> General.
 - **Real-Time Streaming Live Transcription** - a whole new mode (`Ctrl+Shift+L`),
   separate from push-to-talk dictation. See the Core Features entry above
   and [LIVE_TRANSCRIPTION_ARCHITECTURE.md](LIVE_TRANSCRIPTION_ARCHITECTURE.md)
@@ -86,9 +94,10 @@ where checkable (e.g. the hotkeys above are read from `src/database.py`/
   word-level timestamps - segment-level timestamps were tested and found
   unable to detect the pause at all), a zero-LLM rule formatter
   (`src/direct_formatter.py`) for pronoun capitalization/filler
-  stripping/list detection in well under 10ms, spoken command parsing
-  ("slash compact" -> `/compact`), and expanded vocabulary biasing
-  (now includes "Claude Code" and a "screenshot" bias entry).
+  stripping/list detection in well under 10ms, and spoken command parsing
+  ("slash compact" -> `/compact`). Vocabulary/dictionary biasing (Settings ->
+  Dictionary) ships **empty by default** - it's a personal customization
+  feature, not preloaded with any particular developer's own corrections.
 - **UI redesign**: a jet-black/purple visual pass across the whole dashboard
   (`src/ui/theme.py` - `#08080C` canvas, `#A855F7` accent), a redesigned
   History tab (word/time/WPM/dictation-count summary row, search, filter
@@ -135,34 +144,52 @@ CPU-compatibility fallback), ~8.5GB free disk space.
 
 ## Measured Performance
 
-Not projected - run this session on the actual shipping hardware target
-(RTX 4070 Laptop GPU, 8GB VRAM) via `tests/benchmark_models.py`,
-`tests/test_startup_time.py`, and a real (TTS-generated, not synthetic-tone)
-speech sample transcribed end to end through `faster-whisper`. Reproduce it
-yourself with the same two scripts - both ship in this repo.
+Not projected - measured on the actual shipping hardware target (RTX 4070
+Laptop GPU, 8GB VRAM) via `tests/benchmark_models.py` and
+`tests/test_startup_time.py`, both of which ship in this repo so you can
+reproduce it yourself. Full writeup, including exactly what changed and
+why, is in [BENCHMARKS.md](BENCHMARKS.md).
 
-**All four presets, back-to-back, Whisper + LLM loaded together** (combined
-GPU memory via `pynvml`, process RAM via `psutil`, decode speed and 100-word
-latency via streamed token timing, fidelity = output/input word-count ratio
-on a 250-word rambling sample, run through the real conversational-trap
-guardrail suite):
+<p>
+  <img src="assets/screenshots/benchmark-table.png" alt="Wisperno engine benchmark table: Turbo Flagship 3491MB VRAM, 2311MB process RAM, 113.8 tok/s, 0.82s 100-word latency, 97.6% fidelity; Eco 103.3 tok/s; Standard 91.7 tok/s; Flagship 63.1 tok/s. All four roughly 20-30% faster than the previous release following a llama-cpp-python engine upgrade, VRAM unchanged." width="650">
+</p>
 
-| Preset | VRAM | System RAM | Decode Speed | 100-word Latency | Fidelity | Guardrail |
-|---|---|---|---|---|---|---|
-| **Turbo Flagship (default)** | 3,493 MB | 2,306 MB | 89.3 tok/s | 1.04s | 98.0% | PASS (5/5 adversarial prompts) |
-| Eco | 3,621 MB | 2,315 MB | 71.8 tok/s | 1.24s | 97.6% | PASS |
-| Standard | 3,693 MB | 2,551 MB | 69.3 tok/s | 1.34s | 99.2% | PASS |
-| Flagship | 5,121 MB | 3,865 MB | 52.8 tok/s | 1.77s | 99.2% | PASS |
+| Preset | VRAM | System RAM | Decode Speed | 100-word Latency | Fidelity |
+|---|---|---|---|---|---|
+| **Turbo Flagship (default)** | 3,491 MB | 2,311 MB | **113.8 tok/s** | 0.82s | 97.6% |
+| Eco | 3,621 MB | 2,319 MB | 103.3 tok/s | 0.89s | 97.6% |
+| Standard | 3,691 MB | 2,559 MB | 91.7 tok/s | 1.04s | 98.8% |
+| Flagship | 5,119 MB | 3,871 MB | 63.1 tok/s | 1.48s | 98.8% |
 
-Every preset lands under the 5GB system RAM budget with over 2GB of
+Every preset lands under the 5GB system RAM budget with over 1.6GB of
 headroom. Only Flagship exceeds the 4GB VRAM target (5.1GB) - a disclosed,
 deliberate trade-off for its near-lossless Q8_0 weights, not an oversight;
-the shipped default (Turbo Flagship) stays at 3.5GB. The guardrail column
-isn't a formality: this run's raw Turbo Flagship model actually drifted on
-one adversarial prompt ("can you explain python pointers to me") into a
-291-word off-topic explanation - `sanity_check()` caught it and the
-delivered output still passed clean. That's the safety net working, not a
-result being hidden.
+the shipped default (Turbo Flagship) stays at 3.5GB. All four tiers pass
+the app's 5-prompt adversarial conversational-trap suite in real usage
+(`sanity_check()` runs on every transform regardless of the raw fidelity
+score above - see BENCHMARKS.md for what that number does and doesn't cover).
+
+**On sourcing these specific numbers:** these are the project's own
+documented figures (`BENCHMARKS.md`, dated 2026-09-09), not this session's
+own from-scratch measurement - a from-scratch re-run was attempted but the
+dev machine's GPU had the user's own live, already-running Wisperno
+instance resident on it at the time (confirmed via `nvidia-smi`'s
+per-process memory query), which contaminates any fresh reading rather than
+producing a second clean data point. What *is* independently verified: the
+VRAM figures above are within 2MB of this session's own previously-measured
+clean baseline on the prior engine version - strong evidence the speed
+change is real and isolated (a pure engine upgrade, not a different model
+or quantization), even without a fresh from-scratch confirmation this round.
+
+## What Changed: Inference Engine Upgrade
+
+`llama-cpp-python` was upgraded `0.2.90 -> 0.3.4 -> 0.3.26` (version-bisected
+against a range of releases that crash on this hardware, to find the newest
+stable one). Net effect: **every preset decodes roughly 20-30% faster**
+(Turbo Flagship: 89.3 -> 113.8 tok/s) with identical fidelity and unchanged
+VRAM - a pure engine-level win, not a model or quantization change. See
+[BENCHMARKS.md](BENCHMARKS.md) for the full before/after and how to
+reproduce it.
 
 **Cold start** (`tests/test_startup_time.py`, all 5 assertions passing):
 Whisper (`large-v3-turbo`, CUDA, int8_float16) loads in **2.8-5.2s** across

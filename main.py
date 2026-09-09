@@ -111,6 +111,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from src.engine import WispernoEngine  # noqa: E402
 from src.ui.floating_pill import FloatingPill  # noqa: E402
 from src.ui.live_window import LiveTranscriptionWindow  # noqa: E402
+from src.ui.writing_styles_window import WritingStylesWindow  # noqa: E402
 from src.ui.tray import TrayIcon  # noqa: E402
 from src.ui.theme import get_app_icon  # noqa: E402
 
@@ -138,6 +139,7 @@ class WispernoApp:
         self.pill = FloatingPill(
             initial_mode=self.engine.active_mode,
             hotkey_label=self.engine._dictation_hotkey_label(),
+            always_on_top=self.engine.config.pill_always_on_top,
         )
         self.main_window = None
 
@@ -149,6 +151,13 @@ class WispernoApp:
         self.engine.live_transcribe_chunk_received.connect(self.live_window.append_chunk)
         self.engine.live_transcribe_speculative_changed.connect(self.live_window.set_speculative_text)
         self.engine.live_transcribe_state_changed.connect(self._on_live_state_changed)
+
+        self.writing_styles_window = WritingStylesWindow()
+        self.writing_styles_window.style_chosen.connect(self.engine.select_writing_style)
+        self.writing_styles_window.dismissed.connect(self.engine.dismiss_writing_styles)
+        self.engine.writing_styles_no_selection.connect(lambda: self.pill.set_state("no_selection"))
+        self.engine.writing_styles_selection_ready.connect(self.writing_styles_window.show_selection)
+        self.engine.writing_styles_style_ready.connect(self.writing_styles_window.set_style_ready)
 
         self.tray = TrayIcon(self)
         self.tray.open_dashboard_requested.connect(self.open_dashboard)
@@ -236,6 +245,11 @@ class WispernoApp:
     def set_pill_visible(self, visible: bool) -> None:
         self.pill.set_pill_visible(visible)
 
+    def set_pill_always_on_top(self, enabled: bool) -> None:
+        self.pill.set_always_on_top(enabled)
+        self.engine.config.pill_always_on_top = enabled
+        self.engine.save_config()
+
     def _on_pill_close_clicked(self) -> None:
         if self.engine.config.minimize_to_tray:
             self.set_pill_visible(False)
@@ -260,6 +274,7 @@ class WispernoApp:
         if self.main_window is not None:
             self.main_window.close()
         self.live_window.close()
+        self.writing_styles_window.close()
         self.pill.close()
         self.tray.icon.hide()
         self.app.quit()

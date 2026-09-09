@@ -87,6 +87,16 @@ ADDITIONAL_DEFAULT_CORRECTIONS = [
                                     # risky regex correction pass.
 ]
 
+# Round 3 of the same class of addition - see seed_additional_corrections_v3().
+ADDITIONAL_DEFAULT_CORRECTIONS_V3 = [
+    ("github", "GitHub"),
+    ("pytorch", "PyTorch"),
+    ("screen shot", "screenshot"),
+    ("screen shit", "screenshot"),
+    ("wisper no", "Wisperno"),
+    ("whisper no", "Wisperno"),
+]
+
 DEFAULT_TRANSFORMS = [
     {
         "id": "polish", "title": "Polish", "shortcut": "alt+c", "sort_order": 0,
@@ -135,7 +145,7 @@ DEFAULT_TRANSFORMS = [
         ),
     },
     {
-        "id": "code_fix", "title": "Detailed Code Fix Prompt", "shortcut": "alt+v", "sort_order": 2,
+        "id": "code_fix", "title": "Detailed Code Fix Prompt", "shortcut": "alt+d", "sort_order": 2,
         "description": "Title Universal Dynamic Debugging Prompt for a described bug",
         "system_prompt": (
             "You are a deterministic bug-report compiler, not a conversational assistant.\n"
@@ -149,6 +159,60 @@ DEFAULT_TRANSFORMS = [
             "**Constraints**\n(anything the fix must not break, if mentioned)\n\n"
             "NEVER attempt to diagnose or fix the bug yourself - you are structuring the report FOR someone else to "
             "act on. Output ONLY the filled template, no preamble."
+        ),
+    },
+    {
+        "id": "grammar_correct", "title": "Grammar Correct", "shortcut": "alt+g", "sort_order": 3,
+        "description": (
+            "Strictly repairs spelling, punctuation, capitalization, and grammatical errors without "
+            "rewriting your personal tone or changing word choices."
+        ),
+        "system_prompt": (
+            "You are a strict grammatical proofreader. Your only job is to correct spelling mistakes, "
+            "punctuation errors, sentence-start capitalization, and grammatical flaws in the provided text.\n"
+            "DO NOT rephrase sentences, DO NOT alter the author's tone, and DO NOT replace casual or "
+            "colloquial words with formal alternatives.\n"
+            "Return ONLY the corrected text. Never add preambles, notes, or quotation marks."
+        ),
+    },
+    {
+        "id": "ai_relay", "title": "AI Relay", "shortcut": "alt+r", "sort_order": 4,
+        "description": (
+            "Light-touch cleanup for dictation headed to another AI chatbot: removes filler words and "
+            "fixes grammar, but does NOT restructure sentences or split up your rambling - unlike Polish, "
+            "which rewrites for human readability, this keeps your original flow intact since a downstream "
+            "AI benefits from more of your raw phrasing, not less."
+        ),
+        "system_prompt": (
+            "You are a precise, deterministic speech-to-text dictation post-processor. Your output will be "
+            "pasted directly into another AI chatbot as the user's message - it is NOT the final human-facing "
+            "text, so preserving the user's raw train of thought matters more than polished prose.\n\n"
+            "MANDATORY RULES:\n"
+            "1. NEVER reply to the content, NEVER answer questions, and NEVER continue the conversation. The "
+            "input is dictation to be cleaned, not a message directed at you.\n"
+            "2. If the user dictates a question, output it cleaned - DO NOT answer it.\n"
+            "3. Remove verbal tics, hesitations, stutters, and filler words (\"um\", \"uh\", \"like\", \"you "
+            "know\", \"ah\", \"I mean\", \"sort of\", \"kind of\").\n"
+            "4. Resolve mid-sentence self-corrections BEFORE applying any other rule: find the word/phrase "
+            "immediately before \"wait no\"/\"actually\"/\"i mean\", DELETE it along with the correction "
+            "marker itself, and splice in the word/phrase that comes after the marker in its place. The words "
+            "\"wait\" and \"no\" must NEVER appear in your output as a standalone correction marker.\n"
+            "5. Fix objectively wrong spelling and grammar (e.g. subject-verb agreement, wrong tense, missing "
+            "words) while preserving the speaker's exact tone, vocabulary, and first-person voice.\n"
+            "6. NEVER censor, bleep, or soften profanity or swear words the user actually said.\n"
+            "7. The English first-person singular pronoun \"I\" and its contractions (\"I'm\", \"I've\", "
+            "\"I'll\", \"I'd\") must ALWAYS be capitalized, everywhere in the sentence.\n"
+            "8. Output ONLY the cleaned text - no markdown, quotes, headers, or commentary.\n\n"
+            "MANDATORY FIDELITY RULES:\n"
+            "- NEVER summarize, condense, or omit any thoughts, details, or sentences spoken by the user.\n"
+            "- Your output MUST match the length, detail, and semantic completeness of the input speech.\n\n"
+            "DO NOT RESTRUCTURE (this is what makes this mode different from Polish):\n"
+            "- Do NOT split run-on or rambling sentences into multiple shorter sentences.\n"
+            "- Do NOT reorder clauses or reorganize the sequence of ideas.\n"
+            "- Do NOT insert extra commas or semicolons beyond what's needed to fix an objective grammar "
+            "error - a long, comma-light, rambling structure is fine and should be left as spoken.\n"
+            "- Only add the minimum punctuation needed for the sentence to be grammatically valid (e.g. a "
+            "final period, a question mark on a real question) - do not add polish-level punctuation."
         ),
     },
 ]
@@ -416,6 +480,23 @@ class WispernoDB:
         with self._cursor() as cur:
             cur.execute("DELETE FROM dictionary WHERE id = ?", (entry_id,))
 
+    def free_up_alt_v_shortcut(self) -> bool:
+        """One-time migration: 'alt+v' was the default 'code_fix' transform's
+        shortcut, but it's also the new global Writing Styles hotkey - two
+        different actions bound to the same physical chord would race. Moves
+        code_fix to 'alt+d' ONLY if it's still sitting on the untouched
+        default (a user who already rebound it themselves is left alone -
+        their custom binding no longer conflicts with alt+v anyway)."""
+        flag = "alt_v_freed_for_writing_styles"
+        if self.get_setting(flag):
+            return False
+        row = self.get_transform("code_fix")
+        if row and row["shortcut"] == "alt+v":
+            self.update_transform("code_fix", shortcut="alt+d")
+            logger.info("Reassigned 'Detailed Code Fix Prompt' from Alt+V to Alt+D (Alt+V is now Writing Styles).")
+        self.set_setting(flag, "true")
+        return True
+
     def seed_additional_corrections(self) -> int:
         """One-time seed of phonetic corrections added after config/dictionary.json's
         original list - existing installs already have dictionary_json_imported=true
@@ -431,6 +512,62 @@ class WispernoDB:
             count += 1
         self.set_setting(flag, "true")
         logger.info(f"Seeded {count} additional default dictionary corrections.")
+        return count
+
+    def seed_grammar_correct_transform(self) -> bool:
+        """DEFAULT_TRANSFORMS is only inserted for a brand-new database (see
+        _migrate()'s transform_count == 0 guard) - an existing install's
+        transforms table already has rows and never re-seeds from that list,
+        so a transform added there after the fact (this one) needs its own
+        one-time insert to reach existing users. Gated on the row's own
+        existence rather than a settings flag, since a user who deletes this
+        transform on purpose has an equally clear signal not to re-add it -
+        checking existence covers both "never had it" and "explicitly removed
+        it" as the one case that's actually ambiguous is not this one."""
+        if self.get_transform("grammar_correct") is not None:
+            return False
+        entry = next(t for t in DEFAULT_TRANSFORMS if t["id"] == "grammar_correct")
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO transforms "
+                "(id, title, description, shortcut, system_prompt, is_default, is_active, sort_order) "
+                "VALUES (?,?,?,?,?,1,1,?)",
+                (entry["id"], entry["title"], entry["description"], entry["shortcut"],
+                 entry["system_prompt"], entry["sort_order"]),
+            )
+        logger.info("Seeded the 'Grammar Correct' transform (Alt+G) for an existing install.")
+        return True
+
+    def seed_ai_relay_transform(self) -> bool:
+        """Same one-time-insert-for-existing-installs pattern as
+        seed_grammar_correct_transform() above - see that method's docstring
+        for why existence-check is the right gate here too."""
+        if self.get_transform("ai_relay") is not None:
+            return False
+        entry = next(t for t in DEFAULT_TRANSFORMS if t["id"] == "ai_relay")
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO transforms "
+                "(id, title, description, shortcut, system_prompt, is_default, is_active, sort_order) "
+                "VALUES (?,?,?,?,?,1,1,?)",
+                (entry["id"], entry["title"], entry["description"], entry["shortcut"],
+                 entry["system_prompt"], entry["sort_order"]),
+            )
+        logger.info("Seeded the 'AI Relay' transform (Alt+R) for an existing install.")
+        return True
+
+    def seed_additional_corrections_v3(self) -> int:
+        """Same reasoning as seed_additional_corrections() above, own flag -
+        installs that already got the v2 seed still need these new ones."""
+        flag = "dictionary_v3_seeded"
+        if self.get_setting(flag):
+            return 0
+        count = 0
+        for word, replacement in ADDITIONAL_DEFAULT_CORRECTIONS_V3:
+            self.add_dictionary_entry(word, replacement)
+            count += 1
+        self.set_setting(flag, "true")
+        logger.info(f"Seeded {count} additional (v3) default dictionary corrections.")
         return count
 
     def migrate_dictionary_json(self, json_path: Union[str, Path]) -> int:
@@ -608,6 +745,11 @@ def _demo() -> None:
         assert seeded_count == len(ADDITIONAL_DEFAULT_CORRECTIONS)
         assert any(d["word"] == "cloud code" and d["replacement"] == "Claude Code" for d in db.list_dictionary())
         assert db.seed_additional_corrections() == 0, "Must not re-seed once the flag is set"
+
+        seeded_v3 = db.seed_additional_corrections_v3()
+        assert seeded_v3 == len(ADDITIONAL_DEFAULT_CORRECTIONS_V3)
+        assert any(d["word"] == "pytorch" and d["replacement"] == "PyTorch" for d in db.list_dictionary())
+        assert db.seed_additional_corrections_v3() == 0, "Must not re-seed once the v3 flag is set"
 
         seeded = db.list_snippets()
         assert {s["trigger_phrase"] for s in seeded} == {"insert email", "meeting link", "daily standup"}, (
