@@ -166,7 +166,10 @@ class SystemUsageTab(QWidget):
         self.ram_label.setText(
             f"System Used: {ram_used_gb:.1f} / {ram_total_gb:.1f} GB ({pct}%)  |  Free: {ram_free_gb:.1f} GB"
         )
-        self.ram_sub_label.setText(f"Wisperno Process: {app_ram_gb:.1f} GB RAM")
+        self.ram_sub_label.setText(
+            f"Wisperno Process: {app_ram_gb:.1f} GB RAM ({snap['thread_count']} threads)  |  "
+            f"CPU: {snap['cpu_util_pct']:.0f}%"
+        )
 
         self._refresh_engine_card()
 

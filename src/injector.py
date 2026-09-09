@@ -315,7 +315,10 @@ class TextInjector:
             return False
 
         finally:
-            if self.config.restore_clipboard and old_clip is not None:
+            # auto_copy_to_clipboard deliberately overrides restore_clipboard's
+            # own restore step - the whole point of the setting is that the
+            # just-typed text stays the clipboard's contents afterward.
+            if self.config.restore_clipboard and not self.config.auto_copy_to_clipboard and old_clip is not None:
                 try:
                     pyperclip.copy(old_clip)
                 except Exception as e:

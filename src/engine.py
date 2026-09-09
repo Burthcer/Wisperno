@@ -18,11 +18,12 @@ from typing import Dict, Optional
 from PySide6.QtCore import QObject, Signal
 from loguru import logger
 
+from src import audio_cues
 from src.__version__ import __version__
 from src.config import AppConfig, get_app_data_dir, get_base_dir, get_db_path, load_config, save_config
 from src.database import WispernoDB
 from src.vocabulary import Vocabulary
-from src.workers import AudioWorker, HotkeyWorker, InferenceWorker, SelectionPolishWorker
+from src.workers import AudioWorker, HotkeyWorker, InferenceWorker, SelectionPolishWorker, WritingStylesWorker
 
 MODES = ["polish", "prompt_engineer", "bullets", "code", "raw"]
 
@@ -63,6 +64,10 @@ class WispernoEngine(QObject):
     live_transcribe_chunk_received = Signal(str)
     live_transcribe_speculative_changed = Signal(str)  # replaces (never appends) - the current unconfirmed tail
     live_transcribe_session_saved = Signal(dict)  # the finished history row (empty raw = discarded)
+    writing_styles_no_selection = Signal()         # Alt+V pressed with nothing highlighted - pill toast only
+    writing_styles_selection_ready = Signal(str)   # (original_text) - HUD should appear now
+    writing_styles_style_ready = Signal(str, str)  # (style_id, styled_text)
+    writing_styles_all_done = Signal()
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__()
@@ -77,11 +82,18 @@ class WispernoEngine(QObject):
         self._active_transform_id: Optional[str] = None  # set by a per-transform hotkey press, read at release
         self._inference_worker: Optional[InferenceWorker] = None
         self._live_worker = None  # type: Optional["LiveTranscriptionWorker"]
+        self._writing_styles_worker = None  # type: Optional["WritingStylesWorker"]
+        self._writing_styles_selection = ""  # the raw text a chosen style gets saved against in history
+        self._beta_fallback_occurred = False  # set by _load_transformer_with_beta_fallback() this boot
 
         db_path = get_db_path()
         self.db = WispernoDB(db_path)
         self.db.migrate_dictionary_json(get_base_dir() / self.config.dictionary_path)
         self.db.seed_additional_corrections()
+        self.db.seed_additional_corrections_v3()
+        self.db.free_up_alt_v_shortcut()
+        self.db.seed_grammar_correct_transform()
+        self.db.seed_ai_relay_transform()
         self.vocabulary = Vocabulary(db=self.db)
 
         self.audio_worker: Optional[AudioWorker] = None
@@ -200,10 +212,7 @@ class WispernoEngine(QObject):
             self.transcriber = Transcriber(config=self.config.whisper, vocabulary=self.vocabulary)
 
             logger.info("Initializing local SLM transform engine...")
-            self.transformer = Transformer(
-                config=self.config.llm, prompts=self.config.prompts,
-                profanity_filter=self.config.profanity_filter,
-            )
+            self.transformer = self._load_transformer_with_beta_fallback()
 
             logger.info("Initializing Win32 GetAsyncKeyState hotkey manager...")
             transform_hotkeys = _build_transform_hotkeys(self.db)
@@ -214,6 +223,7 @@ class WispernoEngine(QObject):
             self.hotkey_worker.settings_requested.connect(self.settings_requested)
             self.hotkey_worker.dashboard_toggle_requested.connect(self.dashboard_toggle_requested)
             self.hotkey_worker.live_transcribe_toggle_requested.connect(self.toggle_live_transcription)
+            self.hotkey_worker.writing_styles_triggered.connect(self.trigger_writing_styles)
             self.hotkey_worker.transform_press_requested.connect(self._on_transform_press)
             self.hotkey_worker.transform_release_requested.connect(self._on_transform_release)
             self.hotkey_worker.start()
@@ -236,6 +246,8 @@ class WispernoEngine(QObject):
             # back to idle on its own (see floating_pill.py's STATE_CPU_MODE) -
             # nothing in the app is blocked waiting on it being dismissed.
             self.state_changed.emit("cpu_mode")
+        if self._beta_fallback_occurred:
+            self.state_changed.emit("engine_fallback")
 
         triggers = []
         if self.config.tap_toggle_enabled:
@@ -249,6 +261,59 @@ class WispernoEngine(QObject):
         logger.success(f" Press [{self.config.settings_hotkey.upper()}] to open the dashboard.")
         logger.success(f" Initial Mode: [{self.active_mode.upper()}]")
         logger.success("=" * 70)
+
+    def _load_transformer_with_beta_fallback(self) -> "Transformer":
+        """
+        Constructs the Transformer for whatever preset is currently configured.
+        If that preset is the experimental 'gemma_beta' tier and it fails to
+        produce a usable LLM (bad GGUF, incompatible architecture, VRAM
+        overflow, or any other load-time exception), this reverts the LIVE
+        config back to Turbo Flagship, persists that reversion so the NEXT
+        launch doesn't repeat the same failed load, and retries construction
+        once. Only Python-level failures are catchable this way - a genuine
+        native crash inside llama.cpp's C code (an access violation, not a
+        raised exception) can still take the whole process down; this is a
+        real limit of wrapping a ctypes-bound native library in try/except,
+        not something a Python-side try/except can close.
+        """
+        from src.transformer import Transformer
+
+        try:
+            transformer = Transformer(
+                config=self.config.llm, prompts=self.config.prompts,
+                profanity_filter=self.config.profanity_filter,
+            )
+            load_failed = transformer.llm is None
+        except Exception as e:
+            logger.error(f"Transformer construction raised for preset '{self.config.model_preset}': {e}", exc_info=True)
+            transformer = None
+            load_failed = True
+
+        if not (load_failed and self.config.model_preset == "gemma_beta"):
+            return transformer
+
+        logger.error(
+            "Experimental 'Gemma 2 2B (Beta)' preset failed to load - reverting to Turbo Flagship "
+            "and persisting that reversion so the next launch doesn't retry the same failed config."
+        )
+        from src.ui.settings_tab import MODEL_PRESETS  # lazy: avoids engine.py importing the UI layer at module scope
+
+        turbo = MODEL_PRESETS["turbo"]
+        self.config.model_preset = "turbo"
+        self.config.llm.repo_id = turbo["repo_id"]
+        self.config.llm.filename = turbo["filename"]
+        self.config.llm.model_path = turbo["model_path"]
+        self.config.llm.kv_cache_quantization = turbo["kv_cache_quantization"]
+        self.config.llm.n_ctx = turbo["n_ctx"]
+        self.config.llm.flash_attn = turbo["flash_attn"]
+        self.config.llm.chat_style = turbo["chat_style"]
+        self.save_config()
+        self._beta_fallback_occurred = True
+
+        return Transformer(
+            config=self.config.llm, prompts=self.config.prompts,
+            profanity_filter=self.config.profanity_filter,
+        )
 
     # --- Pipeline --------------------------------------------------------------
 
@@ -265,11 +330,15 @@ class WispernoEngine(QObject):
         badge = "DIRECT" if not self.config.auto_llm_polish else self.active_mode.upper()
         logger.info(f"[RECORDING STARTED] (Mode: {badge})...")
         self.state_changed.emit(f"recording:{badge}")
+        if self.config.audio_cues_enabled:
+            audio_cues.play_start_cue()
         self.audio_worker.start_recording()
 
     def _on_ptt_release(self) -> None:
         if not self._engines_ready:
             return
+        if self.config.audio_cues_enabled:
+            audio_cues.play_stop_cue()
         audio_array = self.audio_worker.stop_recording()
         # The captured-audio buffer's own length, not press-to-release wall-clock
         # time (which runs ~0.3-0.5s long from stream start/stop overhead and would
@@ -330,6 +399,8 @@ class WispernoEngine(QObject):
         self._ptt_press_time = time.perf_counter()
         logger.info(f"[RECORDING STARTED] (Transform: {transform_id.upper()})...")
         self.state_changed.emit("recording")
+        if self.config.audio_cues_enabled:
+            audio_cues.play_start_cue()
         self.audio_worker.start_recording()
 
     def _on_transform_release(self, transform_id: str) -> None:
@@ -346,6 +417,8 @@ class WispernoEngine(QObject):
             return
         self._active_transform_id = None
         audio_array = self.audio_worker.stop_recording()
+        if self.config.audio_cues_enabled and audio_array is not None and len(audio_array) > 0:
+            audio_cues.play_stop_cue()  # skipped on a quick tap (no real recording) - see the selection-polish fallback below
         # The captured-audio buffer's own length, not press-to-release wall-clock time - see _on_ptt_release.
         record_duration_ms = self.audio_worker.recorder.last_duration_seconds * 1000
         transform = self.db.get_transform(transform_id)
@@ -431,6 +504,67 @@ class WispernoEngine(QObject):
     def discard_live_transcription(self) -> None:
         if self._live_worker is not None:
             self._live_worker.discard()
+
+    # --- Writing Styles (src/writing_styles.py) ---------------------------------
+    # Uses the same shared Transformer.llm instance InferenceWorker/SelectionPolishWorker
+    # do, so it's gated by the same self._processing single-flight guard those use -
+    # not a separate flag, to actually prevent a concurrent LLM call, not just look like it.
+
+    def trigger_writing_styles(self) -> None:
+        if not self._engines_ready or self._processing or self._live_worker is not None:
+            logger.warning("Writing Styles: cannot start - engines not ready or another pipeline is active.")
+            return
+        self._processing = True
+        worker = WritingStylesWorker(self.injector, self.transformer)
+        worker.no_selection.connect(self._on_writing_styles_no_selection)
+        worker.selection_captured.connect(self._on_writing_styles_selection_captured)
+        worker.style_ready.connect(self.writing_styles_style_ready)
+        worker.all_styles_done.connect(self.writing_styles_all_done)
+        worker.finished.connect(self._on_writing_styles_worker_finished)
+        self._writing_styles_worker = worker
+        worker.start()
+
+    def _on_writing_styles_no_selection(self) -> None:
+        logger.info("[WRITING STYLES] No text selected - nothing to show.")
+        self.writing_styles_no_selection.emit()
+
+    def _on_writing_styles_selection_captured(self, text: str) -> None:
+        self._writing_styles_selection = text
+        self.writing_styles_selection_ready.emit(text)
+
+    def _on_writing_styles_worker_finished(self) -> None:
+        self._writing_styles_worker = None
+        self._processing = False
+
+    def select_writing_style(self, style_id: str, styled_text: str) -> None:
+        """The user picked a style card (click or number-key) - paste it over
+        the original selection and record it to history, tagged so History's
+        badge reads e.g. '[Style: Professional]'."""
+        from src.writing_styles import WRITING_STYLES_BY_ID
+
+        injected = self.injector.inject_text(styled_text)
+        title = WRITING_STYLES_BY_ID[style_id].title if style_id in WRITING_STYLES_BY_ID else style_id
+        try:
+            self.db.add_history(
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                duration_seconds=0.0,
+                raw_transcript=self._writing_styles_selection,
+                polished_transcript=styled_text,
+                mode_used=f"style_{style_id}",
+                latency_ms=0.0,
+                source="writing_style",
+            )
+        except Exception as e:
+            logger.warning(f"Could not write history row for writing style: {e}")
+        self.history_added.emit({
+            "raw_transcript": self._writing_styles_selection, "polished_transcript": styled_text,
+            "mode_used": f"style_{style_id}", "latency_ms": 0.0,
+        })
+        logger.info(f"[WRITING STYLES] Applied '{title}' style (injected={injected}).")
+
+    def dismiss_writing_styles(self) -> None:
+        if self._writing_styles_worker is not None:
+            self._writing_styles_worker.cancel()
 
     def _on_live_session_stopped(self, result: dict) -> None:
         if not result or not result.get("raw", "").strip():
@@ -543,6 +677,14 @@ class WispernoEngine(QObject):
         self.config.auto_llm_polish = enabled
         self.save_config()
 
+    def set_audio_cues_enabled(self, enabled: bool) -> None:
+        self.config.audio_cues_enabled = enabled
+        self.save_config()
+
+    def set_auto_copy_to_clipboard(self, enabled: bool) -> None:
+        self.config.injector.auto_copy_to_clipboard = enabled
+        self.save_config()
+
     def save_config(self) -> None:
         save_config(self.config, self.config_path)
 
@@ -570,6 +712,9 @@ class WispernoEngine(QObject):
             # audio_worker check below.
             self._live_worker.discard()
             self._live_worker.wait(2000)
+        if self._writing_styles_worker is not None:
+            self._writing_styles_worker.cancel()
+            self._writing_styles_worker.wait(2000)
         # A recording left open at shutdown (app closed mid-dictation, before
         # the hotkey was released) leaves sounddevice's native PortAudio
         # callback thread running - that thread is outside Python's threading

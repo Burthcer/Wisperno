@@ -20,9 +20,11 @@ if str(BASE_DIR) not in sys.path:
 
 
 def _build_main_window():
+    import tempfile
+
     from PySide6.QtCore import QObject, Signal
     from PySide6.QtWidgets import QApplication
-    from src.config import load_config, get_db_path
+    from src.config import load_config
     from src.database import WispernoDB
     from src.ui.main_window import MainWindow
 
@@ -44,7 +46,17 @@ def _build_main_window():
         def __init__(self):
             super().__init__()
             self.config = load_config()
-            self.db = WispernoDB(get_db_path())
+            # An isolated temp DB per test, NEVER the real production
+            # %APPDATA%\Wisperno\wisperno.db - a prior version of this file
+            # used get_db_path() directly here, and test_dictionary_add_word_dock_stays_pinned's
+            # 50 synthetic "word0"->"replacement0" entries below ended up
+            # permanently seeded into a real user's actual dictionary as a
+            # result. fd closed immediately - sqlite opens its own handle,
+            # same convention as tests/test_writing_styles.py etc.
+            fd, db_path = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
+            os.unlink(db_path)
+            self.db = WispernoDB(db_path)
             self.transformer = None
             self.transcriber = None
             self.audio_worker = None

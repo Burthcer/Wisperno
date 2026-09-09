@@ -169,6 +169,7 @@ MODEL_PRESETS = {
         "filename": "wisperno-custom-v1.gguf",
         "model_path": "models/wisperno-custom-v1.gguf",
         "kv_cache_quantization": False,
+        "n_ctx": 8192, "flash_attn": True, "chat_style": "standard",
     },
     "standard": {
         "label": "Standard (Balanced)",
@@ -179,6 +180,7 @@ MODEL_PRESETS = {
         "filename": "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
         "model_path": "models/Qwen2.5-3B-Instruct-Q4_K_M.gguf",
         "kv_cache_quantization": True,
+        "n_ctx": 8192, "flash_attn": True, "chat_style": "standard",
     },
     "flagship": {
         "label": "Flagship (Precision)",
@@ -189,6 +191,7 @@ MODEL_PRESETS = {
         "filename": "Qwen2.5-3B-Instruct-Q8_0.gguf",
         "model_path": "models/Qwen2.5-3B-Instruct-Q8_0.gguf",
         "kv_cache_quantization": False,
+        "n_ctx": 8192, "flash_attn": True, "chat_style": "standard",
     },
     "turbo": {
         "label": "Turbo Flagship (Instant Speed)",
@@ -199,6 +202,34 @@ MODEL_PRESETS = {
         "filename": "Qwen2.5-1.5B-Instruct-Q8_0.gguf",
         "model_path": "models/Qwen2.5-1.5B-Instruct-Q8_0.gguf",
         "kv_cache_quantization": False,
+        "n_ctx": 8192, "flash_attn": True, "chat_style": "standard",
+    },
+    "gemma_beta": {
+        "label": "Gemma 2 2B (Beta)",
+        "description": (
+            "Experimental preset built on Google's Gemma-2-2B architecture, evaluated as an alternative "
+            "to Turbo Flagship - measured 59-74 tok/s (vs. Turbo's ~80-91) and a higher cold-prompt TTFT "
+            "(~330ms vs. ~130-180ms), because Gemma-2's attention design is architecturally incompatible "
+            "with flash attention. Real, measured, disclosed cost - this tier is NOT currently faster than "
+            "Turbo Flagship. Kept opt-in for anyone who wants to try a different model architecture; Turbo "
+            "Flagship remains the recommended, faster default."
+        ),
+        "badge": "~3.7 GB VRAM  |  Slower Than Turbo (measured)  |  Beta / Preview",
+        "tooltip": "Beta: a different small-model architecture under evaluation - measured slower than "
+        "Turbo Flagship on this hardware, not a speed upgrade. Falls back to Turbo Flagship automatically "
+        "if it fails to load.",
+        "repo_id": "bartowski/gemma-2-2b-it-GGUF",
+        "filename": "gemma-2-2b-it-Q4_K_M.gguf",
+        "model_path": "models/gemma-2-2b-it-Q4_K_M.gguf",
+        "kv_cache_quantization": False,
+        # Gemma-2's attention/logit softcapping is incompatible with flash
+        # attention (confirmed against llama.cpp's own Gemma-2 support) -
+        # flash_attn must be False here, which also makes kv_cache_quantization
+        # unavailable (it requires flash_attn) regardless of the value above.
+        # n_ctx trimmed from the other presets' 8192 to 4096: this app's own
+        # dictation/transform inputs are a few hundred words at most, and the
+        # smaller window measurably cuts this preset's KV-cache VRAM cost.
+        "n_ctx": 4096, "flash_attn": False, "chat_style": "gemma",
     },
 }
 
@@ -519,6 +550,24 @@ class _GeneralSettings(QWidget):
         self.minimize_to_tray_cb.stateChanged.connect(lambda s: engine.set_minimize_to_tray(s != 0))
         layout.addWidget(self.minimize_to_tray_cb)
 
+        self.always_on_top_cb = QCheckBox("Always Keep Pill on Top (including fullscreen apps/games)")
+        self.always_on_top_cb.setChecked(engine.config.pill_always_on_top)
+        self.always_on_top_cb.stateChanged.connect(self._on_always_on_top_changed)
+        layout.addWidget(self.always_on_top_cb)
+
+        # --- Audio Feedback ---
+        layout.addWidget(_label_title("Audio Feedback"))
+
+        self.audio_cues_cb = QCheckBox("Play a Sound When Dictation Starts/Stops")
+        self.audio_cues_cb.setChecked(engine.config.audio_cues_enabled)
+        self.audio_cues_cb.stateChanged.connect(lambda s: engine.set_audio_cues_enabled(s != 0))
+        layout.addWidget(self.audio_cues_cb)
+
+        self.auto_copy_cb = QCheckBox("Always Copy Transcribed Text to Clipboard")
+        self.auto_copy_cb.setChecked(engine.config.injector.auto_copy_to_clipboard)
+        self.auto_copy_cb.stateChanged.connect(lambda s: engine.set_auto_copy_to_clipboard(s != 0))
+        layout.addWidget(self.auto_copy_cb)
+
         layout.addStretch()
 
     def _on_device_changed(self, _index: int) -> None:
@@ -527,6 +576,10 @@ class _GeneralSettings(QWidget):
     def _on_pill_visibility_changed(self, state: int) -> None:
         if hasattr(self.controller, "set_pill_visible"):
             self.controller.set_pill_visible(state != 0)
+
+    def _on_always_on_top_changed(self, state: int) -> None:
+        if hasattr(self.controller, "set_pill_always_on_top"):
+            self.controller.set_pill_always_on_top(state != 0)
 
     def selected_device_index(self) -> Optional[int]:
         idx = self.device_cb.currentIndex()
@@ -834,6 +887,18 @@ class _AdvancedSettings(QWidget):
         cfg.llm.n_gpu_layers = new_n_gpu_layers
         cfg.model_preset = self.preset_cb.currentData()
         cfg.llm.kv_cache_quantization = self.kv_cache_quant_cb.isChecked()
+        # n_ctx/flash_attn/chat_style are architecture-mandated, not a user
+        # tuning knob (no checkbox for them) - always taken from the selected
+        # preset's own dict, same way repo_id/filename already are above.
+        _selected_preset = MODEL_PRESETS[cfg.model_preset]
+        model_dirty = model_dirty or (
+            cfg.llm.n_ctx != _selected_preset.get("n_ctx", cfg.llm.n_ctx)
+            or cfg.llm.flash_attn != _selected_preset.get("flash_attn", cfg.llm.flash_attn)
+            or cfg.llm.chat_style != _selected_preset.get("chat_style", cfg.llm.chat_style)
+        )
+        cfg.llm.n_ctx = _selected_preset.get("n_ctx", cfg.llm.n_ctx)
+        cfg.llm.flash_attn = _selected_preset.get("flash_attn", cfg.llm.flash_attn)
+        cfg.llm.chat_style = _selected_preset.get("chat_style", cfg.llm.chat_style)
         cfg.whisper.vad_min_silence_duration_ms = self.vad_sensitivity_spin.value()
         cfg.db_retention_policy = self.retention_cb.currentData()
         pruned = self.engine.db.prune_history(cfg.db_retention_policy)

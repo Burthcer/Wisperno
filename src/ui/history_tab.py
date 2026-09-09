@@ -17,6 +17,7 @@ from src.ui import theme
 MODE_LABELS = {
     "polish": "Polish", "prompt_engineer": "Prompt Engineer", "bullets": "Bullets",
     "code": "Code & CLI", "raw": "Raw", "text_polish": "Text Polish", "live": "Live Session",
+    "code_fix": "Code Fix", "grammar_correct": "Grammar Correct",
 }
 
 # Header badge height is a hard invariant (see HEADER_HEIGHT's comment on the
@@ -80,6 +81,7 @@ SOURCE_BADGE_COLORS = {
     "text_polish": theme.ACCENT_SECONDARY,  # muted purple
     "transform": "#10B981",                 # emerald
     "live_transcript": "#10B981",           # emerald - matches the mission's "distinct emerald badge" spec
+    "writing_style": theme.ACCENT_PRIMARY_ACTIVE,  # brighter purple - a Writing Styles (Alt+V) result
 }
 
 
@@ -240,6 +242,9 @@ class HistoryTab(QWidget):
         source = row["source"]
         if source == "text_polish":
             return _source_badge("Selection Polish", SOURCE_BADGE_COLORS["text_polish"])
+        if source == "writing_style":
+            style_title = row["mode_used"].removeprefix("style_").replace("_", " ").title()
+            return _source_badge(f"Style: {style_title}", SOURCE_BADGE_COLORS["writing_style"])
         if source == "transform":
             transform = self.engine.db.get_transform(row["mode_used"])
             name = transform["title"] if transform else row["mode_used"]
@@ -275,11 +280,12 @@ class HistoryTab(QWidget):
             # card, just sourced from the session total rather than one clip.
             header.addWidget(_badge(_format_duration(row["duration_seconds"])))
             header.addWidget(_badge(f'{row["word_count"]} words'))
-        elif row["source"] == "text_polish":
-            # A "Polish Selected Text" entry has no audio - duration_seconds is a
-            # meaningless 0.0 placeholder for it (see workers.py's SelectionPolishWorker,
-            # which always inserts duration_seconds=0.0). Show what actually happened
-            # instead of a misleading "0.0s".
+        elif row["source"] in ("text_polish", "writing_style"):
+            # Neither a "Polish Selected Text" nor a Writing Styles entry has
+            # audio - duration_seconds is a meaningless 0.0 placeholder for
+            # both (see workers.py's SelectionPolishWorker/WritingStylesWorker,
+            # which always insert duration_seconds=0.0). Show what actually
+            # happened instead of a misleading "0.0s".
             header.addWidget(_badge("Selection"))
             header.addWidget(_badge(f'{row["word_count"]} words'))
             header.addWidget(_badge(f'{row["latency_ms"]:.0f}ms'))
@@ -287,7 +293,10 @@ class HistoryTab(QWidget):
             header.addWidget(_badge(_format_duration(row["duration_seconds"])))
             header.addWidget(_badge(f'{row["word_count"]} words'))
             header.addWidget(_badge(f'{row["latency_ms"]:.0f}ms'))
-        if row.get("entry_type") != "live_transcript":
+        # A writing-style entry's source badge already reads "Style: Professional" -
+        # a second badge repeating the raw mode_used ("style_professional") would
+        # just be redundant noise next to it.
+        if row.get("entry_type") != "live_transcript" and row["source"] != "writing_style":
             header.addWidget(_badge(MODE_LABELS.get(row["mode_used"], row["mode_used"])))
         header.addStretch()
         return header_widget

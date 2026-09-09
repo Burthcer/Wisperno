@@ -120,10 +120,33 @@ class LLMConfig(BaseModel):
     n_gpu_layers: int = Field(default=-1, description="Layers offloaded to GPU VRAM; -1 = all layers (100% GPU, zero PCIe/CPU offload - the model comfortably fits VRAM budget at this size)")
     n_threads: int = Field(default=16, description="CPU threads - moot at n_gpu_layers=-1 (nothing runs on CPU), kept for the fallback model / a user manually lowering the GPU-layer slider")
     n_ctx: int = Field(default=8192, description="Context window length in tokens - headroom for long-form dictation/selection chunks; costs ~76MB VRAM over 4096 on a 3B Q4_K_M model, measured")
-    n_batch: int = Field(default=512, description="Prompt batch size")
+    n_batch: int = Field(
+        default=1024,
+        description="Prompt batch size - larger cuts prompt-prefill time (TTFT) on a cold/prompt-switch call; "
+        "measured directly on this GPU (Qwen2.5-1.5B-Q8_0, 1202-token system prompt): 512->1024 cut cold TTFT "
+        "~180ms->~134ms with zero change to steady-state tok/s and zero measurable VRAM delta. 2048 measured "
+        "within noise of 1024 (~129ms) for no further benefit, so not worth its slightly larger compute buffer.",
+    )
     kv_cache_quantization: bool = Field(default=True, description="Q8_0-quantize the KV cache (type_k/type_v=8) to save VRAM; requires flash attention")
     temperature: float = Field(default=0.0, description="Sampling temperature (0.0 = greedy, deterministic)")
     max_tokens: int = Field(default=4096, description="Maximum generated output tokens")
+    flash_attn: bool = Field(
+        default=True,
+        description="Enable llama.cpp flash attention. Must be False for Gemma-2-family models specifically - "
+        "their attention/logit softcapping is architecturally incompatible with flash attention (llama.cpp "
+        "silently disables it for that architecture regardless of this flag, but setting it explicitly here "
+        "keeps kv_cache_quantization - which itself requires flash_attn - from being wired on by mistake "
+        "for a model where it can't actually apply).",
+    )
+    chat_style: str = Field(
+        default="standard",
+        description="'standard' sends a real system-role message via create_chat_completion (works for "
+        "Qwen/Llama-family GGUFs used elsewhere in this app). 'gemma' is required for Gemma-2-family models: "
+        "they have no system role at all - llama-cpp-python's own built-in gemma chat-format handler "
+        "silently DROPS a system message rather than erroring (verified directly against this app's pinned "
+        "llama-cpp-python==0.2.90), so the 'gemma' style instead folds the system prompt into the first user "
+        "turn itself before formatting, matching Gemma's native <start_of_turn>user/<end_of_turn> template.",
+    )
 
     # Lightweight fallback used automatically when the primary model file isn't
     # present on disk (e.g. still downloading). Llama-3.2-3B-Instruct - NOT
@@ -138,6 +161,11 @@ class InjectorConfig(BaseModel):
     pre_paste_delay_ms: int = Field(default=40, description="Delay before sending Ctrl+V for clipboard synchronization")
     post_paste_delay_ms: int = Field(default=80, description="Delay after paste before restoring previous clipboard")
     restore_clipboard: bool = Field(default=True, description="Whether to restore prior clipboard content")
+    auto_copy_to_clipboard: bool = Field(
+        default=False,
+        description="Leave the transcribed/polished text on the clipboard after typing it, instead of restoring "
+        "whatever was there before - overrides restore_clipboard's own restore step when enabled",
+    )
 
 
 class AppConfig(BaseModel):
@@ -158,7 +186,10 @@ class AppConfig(BaseModel):
     settings_hotkey: str = Field(default="ctrl+,", description="Hotkey to open the Settings & Dictionary window")
     dashboard_hotkey: str = Field(default="ctrl+shift+h", description="Hotkey to toggle the full desktop dashboard window")
     live_transcribe_hotkey: str = Field(default="ctrl+shift+l", description="Hotkey to start/stop a Live Transcription session")
+    writing_styles_hotkey: str = Field(default="alt+v", description="Hotkey to open the Writing Styles HUD on the current text selection")
     minimize_to_tray: bool = Field(default=True, description="Closing the dashboard/pill minimizes to tray instead of quitting")
+    pill_always_on_top: bool = Field(default=True, description="Keep the floating pill above other windows, including fullscreen apps/games")
+    audio_cues_enabled: bool = Field(default=False, description="Play a short tone when dictation starts and stops")
     db_retention_policy: str = Field(default="never", description="History auto-prune window: '3_months', '6_months', '1_year', or 'never'")
     active_mode: str = Field(default="polish", description="Active transformation mode ('polish', 'prompt_engineer', 'bullets', 'raw')")
     dictionary_path: str = Field(default="config/dictionary.json", description="Custom word-replacement dictionary path")

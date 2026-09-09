@@ -40,6 +40,7 @@ def test_engine_stop_closes_open_audio_stream() -> None:
     engine.db = WispernoDB(get_db_path())
     engine.hotkey_worker = None
     engine._live_worker = None
+    engine._writing_styles_worker = None
     engine.audio_worker = AudioWorker(engine.config.audio)
 
     try:

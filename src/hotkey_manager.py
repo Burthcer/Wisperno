@@ -91,12 +91,14 @@ class HotkeyManager:
         settings_hotkey: Optional[str] = None,
         dashboard_hotkey: Optional[str] = None,
         live_transcribe_hotkey: Optional[str] = None,
+        writing_styles_hotkey: Optional[str] = None,
         on_press: Optional[Callable[[], None]] = None,
         on_release: Optional[Callable[[], None]] = None,
         on_mode_cycle: Optional[Callable[[str], None]] = None,
         on_settings_open: Optional[Callable[[], None]] = None,
         on_dashboard_toggle: Optional[Callable[[], None]] = None,
         on_live_transcribe_toggle: Optional[Callable[[], None]] = None,
+        on_writing_styles_trigger: Optional[Callable[[], None]] = None,
         transform_hotkeys: Optional[Dict[str, str]] = None,
         on_transform_press: Optional[Callable[[str], None]] = None,
         on_transform_release: Optional[Callable[[str], None]] = None,
@@ -120,12 +122,14 @@ class HotkeyManager:
         self.settings_hotkey_str = settings_hotkey
         self.dashboard_hotkey_str = dashboard_hotkey
         self.live_transcribe_hotkey_str = live_transcribe_hotkey
+        self.writing_styles_hotkey_str = writing_styles_hotkey
         self.on_press_callback = on_press
         self.on_release_callback = on_release
         self.on_mode_cycle_callback = on_mode_cycle
         self.on_settings_open_callback = on_settings_open
         self.on_dashboard_toggle_callback = on_dashboard_toggle
         self.on_live_transcribe_toggle_callback = on_live_transcribe_toggle
+        self.on_writing_styles_trigger_callback = on_writing_styles_trigger
         self.on_transform_press_callback = on_transform_press
         self.on_transform_release_callback = on_transform_release
         self.poll_interval = poll_interval_sec
@@ -145,6 +149,9 @@ class HotkeyManager:
         self._dashboard_vks = parse_hotkey_to_vks(self.dashboard_hotkey_str) if self.dashboard_hotkey_str else set()
         self._live_transcribe_vks = (
             parse_hotkey_to_vks(self.live_transcribe_hotkey_str) if self.live_transcribe_hotkey_str else set()
+        )
+        self._writing_styles_vks = (
+            parse_hotkey_to_vks(self.writing_styles_hotkey_str) if self.writing_styles_hotkey_str else set()
         )
         # Per-transform hotkeys (e.g. Alt+C -> "polish", Alt+X -> "prompt_engineer"):
         # each held like a dictation hotkey but tagged with which transform to
@@ -168,6 +175,7 @@ class HotkeyManager:
         self._is_settings_down = False
         self._is_dashboard_down = False
         self._is_live_transcribe_down = False
+        self._is_writing_styles_down = False
         self._down_since: Dict[str, float] = {}  # debounce bookkeeping, keyed by trigger name
         self._hold_active_since = 0.0
         self._toggle_active_since = 0.0
@@ -370,6 +378,10 @@ class HotkeyManager:
                     "live_transcribe",
                     self._all_vks_down(self._live_transcribe_vks) if self._live_transcribe_vks else False,
                 )
+                writing_styles_active = self._debounced(
+                    "writing_styles",
+                    self._all_vks_down(self._writing_styles_vks) if self._writing_styles_vks else False,
+                )
                 tap_raw_down = self._all_vks_down(self._tap_vks) if self.tap_toggle_enabled else False
                 hold_raw_down = self._all_vks_down(self._hold_vks) if self.hold_to_talk_enabled else False
                 # HOLD_TO_TALK still uses the press-debounce (guards against a ghost
@@ -419,6 +431,16 @@ class HotkeyManager:
                 else:
                     self._is_live_transcribe_down = False
 
+                # 2c-2. Check Writing Styles trigger (default Alt+V)
+                if writing_styles_active:
+                    if not self._is_writing_styles_down:
+                        self._is_writing_styles_down = True
+                        logger.info("[HOTKEY] Triggering Writing Styles HUD.")
+                        if self.on_writing_styles_trigger_callback:
+                            threading.Thread(target=self.on_writing_styles_trigger_callback, daemon=True).start()
+                else:
+                    self._is_writing_styles_down = False
+
                 # 2d. Check per-Transform hotkeys (e.g. Alt+C / Alt+X / Alt+V) - hold to
                 # dictate with that transform, same shape as PTT but per transform_id.
                 any_transform_active = False
@@ -451,7 +473,7 @@ class HotkeyManager:
                 # dictation trigger while it owns an in-flight recording.
                 blocked_other = (
                     cycle_active or self._is_cycle_down or settings_active or dashboard_active
-                    or live_transcribe_active or any_transform_active
+                    or live_transcribe_active or writing_styles_active or any_transform_active
                 )
                 if self.tap_toggle_enabled:
                     self._handle_tap_to_toggle(tap_raw_down, blocked_other or self._active_trigger == "hold")

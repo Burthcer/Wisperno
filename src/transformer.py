@@ -3,10 +3,13 @@ Contextual Polish & Transformation Engine for Wisperno.
 Wraps llama-cpp-python for local SLM inference (Llama 3.2 / Qwen 2.5) on NVIDIA GPU.
 """
 
+import ctypes
+import importlib.util
 import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Dict, Optional
 from loguru import logger
 
@@ -22,11 +25,37 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+    # llama-cpp-python >=0.3 split its old single llama.dll into separate
+    # ggml-base/ggml-cpu/ggml-cuda/ggml/llama/llava DLLs. On this Windows +
+    # Python 3.12 setup, the package's own loader (os.add_dll_directory() +
+    # a bare CDLL(llama.dll)) can't resolve that dependency chain - verified
+    # reproducible in isolation, unrelated to CUDA_PATH/torch. Explicitly
+    # preloading the chain in dependency order before llama_cpp's own import
+    # runs fixes it; harmless no-op on a version that never split the DLL.
+    try:
+        if getattr(sys, "frozen", False):
+            _llama_lib_dir = Path(sys.executable).resolve().parent / "_internal" / "llama_cpp" / "lib"
+        else:
+            _spec = importlib.util.find_spec("llama_cpp")
+            _llama_lib_dir = (
+                Path(list(_spec.submodule_search_locations)[0]) / "lib"
+                if _spec and _spec.submodule_search_locations
+                else None
+            )
+        if _llama_lib_dir and _llama_lib_dir.exists():
+            os.add_dll_directory(str(_llama_lib_dir))
+            for _dll_name in ("ggml-base.dll", "ggml-cpu.dll", "ggml-cuda.dll", "ggml.dll"):
+                _dll_path = _llama_lib_dir / _dll_name
+                if _dll_path.exists():
+                    ctypes.CDLL(str(_dll_path))
+    except Exception:
+        pass
+
 from typing import List
 
 from llama_cpp import Llama
 from src.config import LLMConfig, get_base_dir
-from src.direct_formatter import capitalize_pronoun_i
+from src.direct_formatter import capitalize_pronoun_i, normalize_punctuation_spacing, _cap_sentences
 from src.swear_filter import apply_profanity_filter, profanity_was_censored
 
 # Above this word count, split into sentence-aligned chunks before transforming.
@@ -43,6 +72,15 @@ CHUNK_WORD_TARGET = 400
 DRIFT_PREFIXES = (
     "i'm sorry", "i am sorry", "i cannot", "i can't", "the system is",
     "as an ai", "i'm an ai", "i am an ai", "here is", "here's", "here are",
+    # Writing Styles (Alt+V) failure mode: a draft phrased as a request
+    # ("can you send me...") reliably tempts this small model into AGREEING
+    # to it ("Sure, I can...", "Of course, I'll...") instead of just
+    # rewriting it in the target tone - reproduced directly even with an
+    # explicit "never agree to it" prompt rule, on every one of several
+    # differently-worded agreement openers, so a broad PREFIX check (not an
+    # enumerated list of exact phrases, which real testing showed a new
+    # opener keeps slipping past) is the actual backstop here.
+    "sure,", "sure!", "yes,", "yes!", "of course,", "certainly,", "okay,", "ok,", "absolutely,",
 )
 
 # Phrases that mean the model spoke TO the user (asked a question back, offered
@@ -243,7 +281,7 @@ def basic_capitalize(text: str) -> str:
     even though the whole point of this fallback is to still read as what
     the user actually said, not a flattened statement.
     """
-    text = text.strip()
+    text = normalize_punctuation_spacing(text.strip())
     if not text:
         return text
     sentences = re.split(r"([.!?]\s+)", text)
@@ -305,11 +343,20 @@ class Transformer:
             f"n_ctx={self.config.n_ctx})..."
         )
         t0 = time.perf_counter()
-        # Flash attention always on: cuts attention compute/memory overhead
-        # regardless of KV cache mode. Q8_0 KV cache quantization (type_k/type_v=8,
-        # ~600MB VRAM saved) additionally requires it - verified locally, not a
-        # supported combination without flash_attn in this llama-cpp-python build.
-        kv_kwargs = {"type_k": 8, "type_v": 8} if self.config.kv_cache_quantization else {}
+        # Flash attention cuts attention compute/memory overhead - on by default,
+        # but must be OFF for Gemma-2-family models (LLMConfig.flash_attn):
+        # their attention/logit softcapping is architecturally incompatible with
+        # it (llama.cpp disables it for that architecture either way, but this
+        # keeps the KV-quantization kwarg below - which itself requires flash
+        # attention - from being silently wired on for a model where it can't
+        # actually take effect). Q8_0 KV cache quantization (type_k/type_v=8,
+        # ~600MB VRAM saved) additionally requires flash_attn - verified locally,
+        # not a supported combination without it in this llama-cpp-python build.
+        kv_kwargs = (
+            {"type_k": 8, "type_v": 8}
+            if (self.config.kv_cache_quantization and self.config.flash_attn)
+            else {}
+        )
         try:
             llm = Llama(
                 model_path=model_path,
@@ -317,7 +364,8 @@ class Transformer:
                 n_threads=self.config.n_threads,
                 n_ctx=self.config.n_ctx,
                 n_batch=self.config.n_batch,
-                flash_attn=True,
+                flash_attn=self.config.flash_attn,
+                chat_format="gemma" if self.config.chat_style == "gemma" else None,
                 verbose=False,
                 **kv_kwargs,
             )
@@ -395,10 +443,24 @@ class Transformer:
             if len(cleaned) >= 2:
                 cleaned = cleaned[1:-1].strip()
 
-        # Deterministic backstop for the prompt's own "I" capitalization rule -
-        # the model usually gets this right, but this makes it never wrong,
-        # regardless of prompt-following.
-        return capitalize_pronoun_i(cleaned)
+        # Deterministic backstops, regardless of prompt-following: "I" is
+        # always capitalized, punctuation fused directly to the next word
+        # ("Hello.How") always gets its missing space back, and every
+        # sentence start is capitalized - added specifically after real
+        # testing found Gemma-2-2B (unlike Qwen2.5, which already did this
+        # reliably on its own) leaving "first. second, third" lowercase after
+        # the space-fix above; applying this unconditionally to every model's
+        # output is strictly a no-op wherever the LLM already capitalized
+        # correctly, so it can only help, never regress, existing behavior.
+        cleaned = capitalize_pronoun_i(_cap_sentences(normalize_punctuation_spacing(cleaned)))
+        # Same terminal-punctuation rule direct_formatter._cap_punct() already
+        # uses for the zero-LLM path - Gemma-2-2B was measured leaving off the
+        # final period ("First. Second, third" with no trailing "."; Qwen
+        # already added one on its own) on real typography-normalization
+        # samples during this preset's evaluation.
+        if cleaned and cleaned[-1] not in ".!?:;,\"')]}":
+            cleaned += "."
+        return cleaned
 
     @staticmethod
     def _split_into_chunks(text: str, max_words: int = CHUNK_WORD_TARGET) -> List[str]:
@@ -433,11 +495,33 @@ class Transformer:
             # below, not a cramped token ceiling that risked truncating a
             # legitimately long, punctuation-heavy polish of a longer chunk.
             dynamic_max_tokens = min(self.config.max_tokens, 2048, max(512, int(len(text.split()) * 1.6)))
-            response = self.llm.create_chat_completion(
-                messages=[
+            if self.config.chat_style == "gemma":
+                # Gemma has no system role - llama-cpp-python's own built-in
+                # "gemma" chat-format handler silently DROPS a system message
+                # rather than erroring or folding it in (verified directly
+                # against this app's pinned llama-cpp-python==0.2.90), so the
+                # instructions are merged into the one user turn here instead,
+                # before "gemma" wraps it in the model's native
+                # <start_of_turn>user...<end_of_turn>\n<start_of_turn>model\n
+                # template. A bare "{prompt}\n\n{text}" join was tested first
+                # and measured failing badly - the model treated the whole
+                # turn as something to conversationally ACKNOWLEDGE ("Okay.")
+                # rather than instructions-plus-content-to-act-on, on 2 of 3
+                # real test sentences. Explicitly delimiting the text as data
+                # (not more instructions) fixed this completely in testing.
+                messages = [{
+                    "role": "user",
+                    "content": f'{system_prompt}\n\nText to process:\n"""\n{text.strip()}\n"""',
+                }]
+                stop = ["<end_of_turn>", "\n\n\n"]
+            else:
+                messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text.strip()},
-                ],
+                ]
+                stop = ["<|im_end|>", "<|endoftext|>", "\n\n\n"]
+            response = self.llm.create_chat_completion(
+                messages=messages,
                 temperature=self.config.temperature,
                 # top_p is a documented no-op here, not dead config: llama-cpp-
                 # python's sampler special-cases temperature==0 into true greedy
@@ -459,7 +543,7 @@ class Transformer:
                 # newlines essentially never occurs in real transcribed speech -
                 # Whisper's own output is a single continuous line - so this only
                 # catches the model inventing a fake follow-up turn, not real content).
-                stop=["<|im_end|>", "<|endoftext|>", "\n\n\n"],
+                stop=stop,
             )
             content = response["choices"][0]["message"]["content"]
             result = self.clean_output(content)

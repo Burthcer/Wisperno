@@ -158,6 +158,17 @@ class SystemMonitor:
             except Exception as e:
                 logger.debug(f"GPU temperature read failed: {e}")
 
+        # cpu_percent(interval=None) reports the delta since the LAST call on
+        # this process - meaningless (always 0.0) on the very first call ever
+        # made, which is fine here since this is polled every 2s for the life
+        # of the app (system_usage_tab.py's QTimer), not read once.
+        cpu_util_pct = psutil.cpu_percent(interval=None)
+        try:
+            thread_count = psutil.Process(self._pid).num_threads()
+        except Exception as e:
+            logger.debug(f"Thread count read failed: {e}")
+            thread_count = 0
+
         return {
             "gpu_total_mb": gpu_total_mb,
             "gpu_used_mb": gpu_used_mb,
@@ -167,6 +178,8 @@ class SystemMonitor:
             "ram_total_mb": ram.total / 1024 / 1024,
             "ram_used_mb": ram.used / 1024 / 1024,
             "app_ram_mb": app_ram_mb,
+            "cpu_util_pct": cpu_util_pct,
+            "thread_count": thread_count,
         }
 
     def close(self) -> None:

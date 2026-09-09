@@ -71,6 +71,7 @@ class HotkeyWorker(QObject):
     settings_requested = Signal()
     dashboard_toggle_requested = Signal()
     live_transcribe_toggle_requested = Signal()
+    writing_styles_triggered = Signal()
     transform_press_requested = Signal(str)
     transform_release_requested = Signal(str)
 
@@ -85,6 +86,7 @@ class HotkeyWorker(QObject):
             settings_hotkey=config.settings_hotkey,
             dashboard_hotkey=config.dashboard_hotkey,
             live_transcribe_hotkey=config.live_transcribe_hotkey,
+            writing_styles_hotkey=config.writing_styles_hotkey,
             transform_hotkeys=transform_hotkeys or {},
             on_press=self.recording_started.emit,
             on_release=self.recording_stopped.emit,
@@ -92,6 +94,7 @@ class HotkeyWorker(QObject):
             on_settings_open=self.settings_requested.emit,
             on_dashboard_toggle=self.dashboard_toggle_requested.emit,
             on_live_transcribe_toggle=self.live_transcribe_toggle_requested.emit,
+            on_writing_styles_trigger=self.writing_styles_triggered.emit,
             on_transform_press=self.transform_press_requested.emit,
             on_transform_release=self.transform_release_requested.emit,
             available_modes=["polish", "prompt_engineer", "bullets", "code", "raw"],
@@ -303,3 +306,61 @@ class SelectionPolishWorker(QThread):
             logger.error(f"SelectionPolishWorker pipeline error: {e}", exc_info=True)
             self.error.emit(str(e))
             self.state_changed.emit("idle")
+
+
+class WritingStylesWorker(QThread):
+    """
+    Alt+V "Writing Styles" pipeline: Ctrl+C the current selection, then run
+    it through every style in src/writing_styles.WRITING_STYLES as its own
+    separate, independent LLM call - emitting style_ready() as each one
+    finishes so the HUD can populate cards progressively instead of blocking
+    on all five. Injection/history-recording happens on style SELECTION
+    (see engine.py), not here - this worker's only job is capture + generate.
+    """
+
+    no_selection = Signal()            # nothing was highlighted - show the pill toast, no HUD
+    selection_captured = Signal(str)   # HUD should appear now, cards start in a loading state
+    style_ready = Signal(str, str)     # (style_id, styled_text)
+    all_styles_done = Signal()
+    error = Signal(str)
+
+    def __init__(self, injector, transformer, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self.injector = injector
+        self.transformer = transformer
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Called when the user dismisses the HUD before generation finishes -
+        the in-flight LLM call still completes (llama.cpp has no cooperative
+        cancel), but no further styles are started afterward."""
+        self._cancelled = True
+
+    def run(self) -> None:
+        from src.writing_styles import WRITING_STYLES
+
+        try:
+            selected_text = self.injector.copy_selection()
+            if not selected_text or len(selected_text.strip()) < 2:
+                logger.info("Writing Styles: nothing usable was selected - dismissing.")
+                self.no_selection.emit()
+                return
+
+            self.selection_captured.emit(selected_text)
+
+            for style in WRITING_STYLES:
+                if self._cancelled:
+                    return
+                styled_text = self.transformer.transform_with_prompt(
+                    selected_text, style.system_prompt, label=f"style_{style.id}"
+                )
+                if self._cancelled:
+                    return
+                self.style_ready.emit(style.id, styled_text)
+
+            if not self._cancelled:
+                self.all_styles_done.emit()
+
+        except Exception as e:
+            logger.error(f"WritingStylesWorker pipeline error: {e}", exc_info=True)
+            self.error.emit(str(e))
